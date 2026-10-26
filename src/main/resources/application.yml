@@ -1,0 +1,20 @@
+spring:
+  application:
+    name: pedidos-logistica
+  datasource:
+    # H2 en memoria: el esquema se crea con Flyway en cada arranque (D9).
+    url: jdbc:h2:mem:pedidos;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+  jpa:
+    hibernate:
+      # Flyway es el dueño del esquema; Hibernate solo comprueba que las entidades cuadran.
+      ddl-auto: validate
+    # Sin sesión abierta durante la vista: cualquier carga perezosa fuera de la transacción falla pronto.
+    open-in-view: false
+  flyway:
+    enabled: true
+
+server:
+  port: 8080
