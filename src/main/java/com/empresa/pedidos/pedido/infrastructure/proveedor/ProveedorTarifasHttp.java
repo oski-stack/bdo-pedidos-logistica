@@ -141,8 +141,10 @@ class ProveedorTarifasHttp implements ProveedorTarifas {
 
     /**
      * Fallos en los que la petición no llegó a enviarse: conexión rechazada, host no resoluble o timeout de
-     * conexión. {@code HttpConnectTimeoutException} hereda de {@code HttpTimeoutException}, que es el
-     * timeout de respuesta y no se reintenta: por eso se comprueba aquí, antes que el caso general.
+     * conexión. El cliente del JDK entrega el host no resoluble como {@code ConnectException} con causa
+     * {@code UnresolvedAddressException}. {@code HttpConnectTimeoutException} hereda de
+     * {@code HttpTimeoutException}, que es el timeout del intercambio y no se reintenta: por eso se
+     * comprueba aquí, antes que el caso general.
      */
     static boolean esFalloDeConexion(Throwable causa) {
         return causa instanceof HttpConnectTimeoutException || causa instanceof ConnectException;

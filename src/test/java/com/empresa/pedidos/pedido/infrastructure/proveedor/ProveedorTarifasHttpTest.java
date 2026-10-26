@@ -26,6 +26,7 @@ import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpTimeoutException;
+import java.nio.channels.UnresolvedAddressException;
 import java.time.Duration;
 import org.springframework.web.client.ResourceAccessException;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -214,6 +215,17 @@ class ProveedorTarifasHttpTest {
         assertThat(traducir(new ConnectException("rechazada"))).isInstanceOf(FalloRecuperableException.class);
         assertThat(traducir(new HttpTimeoutException("intercambio"))).isInstanceOf(ProveedorNoDisponibleException.class);
         assertThat(traducir(new IOException("conexión cortada"))).isInstanceOf(ProveedorNoDisponibleException.class);
+    }
+
+    @Test
+    void unHostNoResolubleSeReintenta() {
+        // Forma exacta que entrega el cliente del JDK 17 ante un fallo de DNS (comprobado ejecutando contra un
+        // host .invalid): ConnectException con causa UnresolvedAddressException. No se usa un host real: el
+        // resultado dependería del resolvedor DNS de la red.
+        ConnectException dns = new ConnectException();
+        dns.initCause(new UnresolvedAddressException());
+
+        assertThat(traducir(dns)).isInstanceOf(FalloRecuperableException.class);
     }
 
     private static RuntimeException traducir(IOException causa) {

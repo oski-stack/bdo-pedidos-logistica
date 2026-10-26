@@ -110,7 +110,7 @@ Evolución: cabecera `Idempotency-Key`.
   - Con `JdkClientHttpRequestFactory` (Spring 6.2), el "timeout de lectura" es un límite de **todo el intercambio** de un intento: conexión, envío, cabeceras y cuerpo. El presupuesto real para la respuesta es 6 s menos lo que tarde la conexión.
   - Por eso la configuración exige lectura > conexión: si no, un timeout de conexión llegaría como timeout del intercambio y dejaría de reintentarse sin avisar.
 - **Reintentos (Resilience4j):** **2 intentos como máximo**, solo ante errores definidos como recuperables, con backoff exponencial y jitter.
-  - Recuperables: el **503 exacto** y los errores de conexión en los que la petición no llegó a enviarse (conexión rechazada, host no resoluble, timeout de conexión).
+  - Recuperables: el **503 exacto** y los errores de conexión en los que la petición no llegó a enviarse (conexión rechazada, host no resoluble, timeout de conexión). El cliente del JDK entrega el host no resoluble como `ConnectException` con causa `UnresolvedAddressException`, así que queda cubierto por la comprobación de `ConnectException` (comprobado ejecutando contra un host `.invalid`).
   - **No** se reintenta tras un timeout de lectura, porque ya se ha consumido el tiempo de un intento.
   - **No** se reintentan los 4xx, los demás 5xx, las respuestas inválidas ni otros errores de E/S (por ejemplo, una conexión cortada después de enviar la petición: el proveedor pudo recibirla).
   - "2 intentos" son intentos HTTP. Ante una conexión rechazada, el cliente del JDK repite internamente la conexión TCP; no duplica peticiones, porque el proveedor no ha recibido nada.
@@ -120,7 +120,7 @@ Evolución: cabecera `Idempotency-Key`.
   | Fallo | Reintento | Resultado (D5) |
   |---|---|---|
   | 503 | Sí | Agotados los intentos: no disponible → 503 |
-  | `ConnectException`, `HttpConnectTimeoutException` | Sí | Agotados los intentos: no disponible → 503 |
+  | `ConnectException` (incluye el host no resoluble), `HttpConnectTimeoutException` | Sí | Agotados los intentos: no disponible → 503 |
   | `HttpTimeoutException` (timeout del intercambio) | No | No disponible → 503 |
   | Otro 5xx | No | No disponible → 503 |
   | Otro error de E/S, también si el cuerpo se corta o vence el timeout mientras llega | No | No disponible → 503 |
@@ -129,7 +129,10 @@ Evolución: cabecera `Idempotency-Key`.
 
   `HttpConnectTimeoutException` **hereda** de `HttpTimeoutException`: el código comprueba primero el fallo de conexión para que un timeout de conexión no se trate como timeout de respuesta.
 - **Qué es recuperable lo decide el código, no la configuración:** el `Retry` se construye a partir de `ProveedorTarifasProperties` y solo reintenta una excepción interna del adaptador. Se descarta `@Retry` con `retry-exceptions` en el yml: depende de un proxy AOP (con la misma trampa de autoinvocación que `@Transactional`) y deja la clasificación en un fichero de configuración.
-- **Latencia:** los timeouts se configuran por intento; **no se establece un límite global estricto** para la operación. El peor caso ronda dos timeouts de lectura más la espera del backoff, pero es una estimación: no incluye, por ejemplo, la adquisición de conexión ni otras fases del cliente HTTP.
+- **Latencia:** los timeouts se configuran por intento; **no se establece un límite global estricto** para la operación.
+  - `JdkClientHttpRequestFactory` no usa `HttpRequest.timeout()` del JDK (que solo cubre la espera hasta las cabeceras). Arranca su propio temporizador al iniciar el envío (`sendAsync`) y lo cancela al cerrar el cuerpo de la respuesta. Dentro de ese límite de 6 s por intento entran la resolución DNS, la obtención o el establecimiento de la conexión HTTP (con su propio límite de 1 s y los reintentos TCP internos del JDK), el envío, las cabeceras y el cuerpo.
+  - Peor caso de la llamada al proveedor: 2 intentos × 6 s + la espera entre ellos (200 ms ± 50 %) ≈ **12,3 s**.
+  - No es una garantía de la operación completa: quedan fuera el tiempo antes de iniciar el intercambio (construir la petición), el posterior (validar la respuesta) y el resto de la confirmación (las transacciones de reserva y finalización, incluida la espera por una conexión del pool de base de datos).
 - **Por qué 2 intentos:** equilibrio entre capacidad de recuperación y latencia de una petición síncrona. Sin datos reales del proveedor no se puede afirmar qué porcentaje de fallos recupera un reintento.
 - **Supuesto:** consultar una tarifa no tiene efectos secundarios, por lo que reintentar es seguro. El contrato no lo garantiza explícitamente.
 - **Fuera de alcance:** presupuesto global de tiempo (TimeLimiter), circuit breaker y confirmación asíncrona (202 + outbox).
