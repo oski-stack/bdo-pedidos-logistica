@@ -34,6 +34,8 @@ class PedidoTest {
         assertThat(pedido.getFecha()).isEqualTo(FECHA);
         assertThat(pedido.getCosteEnvio()).isNull();
         assertThat(pedido.getImporteTotal()).isNull();
+        assertThat(pedido.solicitudTarifa())
+                .isEqualTo(new SolicitudTarifa("28001", new BigDecimal("1.600"), 4));
     }
 
     @Test

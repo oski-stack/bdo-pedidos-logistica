@@ -191,6 +191,11 @@ public class Pedido {
         return bultos;
     }
 
+    /** @return los datos que se envían al proveedor de tarifas para este pedido (D1). */
+    public SolicitudTarifa solicitudTarifa() {
+        return new SolicitudTarifa(codigoPostalDestino, pesoTotalKg(), numBultos());
+    }
+
     public Long getId() {
         return id;
     }

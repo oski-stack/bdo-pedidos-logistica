@@ -1,0 +1,10 @@
+# Configuración de los tests. Spring carga classpath:/config/application.yml además de
+# classpath:/application.yml y le da prioridad, así que aquí solo se sobrescribe lo necesario.
+# Funciona igual con Maven y desde el IDE, sin variables de entorno ni secretos reales (D8).
+proveedor:
+  token: token-de-prueba
+  timeout-conexion: 200ms
+  timeout-lectura: 500ms
+  reintentos:
+    espera-inicial: 10ms
+    jitter: 0.0

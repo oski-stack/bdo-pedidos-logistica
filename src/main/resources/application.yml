@@ -22,3 +22,17 @@ spring:
 
 server:
   port: 8080
+
+# Proveedor logístico de tarifas (D6, D8).
+proveedor:
+  url-base: ${PROVEEDOR_URL:http://localhost:8089}
+  # Solo desde la variable de entorno. Vacío por defecto: @NotBlank hace que la app no arranque sin él.
+  token: ${PROVEEDOR_TOKEN:}
+  # Por intento. El proveedor puede tardar hasta 5 s legítimamente.
+  timeout-conexion: 1s
+  timeout-lectura: 6s
+  reintentos:
+    max-intentos: 2
+    espera-inicial: 200ms
+    multiplicador: 2.0
+    jitter: 0.5
