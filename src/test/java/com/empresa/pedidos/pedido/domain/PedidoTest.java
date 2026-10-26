@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.springframework.test.util.ReflectionTestUtils;
 
 /** Reglas de cálculo y validación del dominio, sin Spring (D1, D2, D7). */
 class PedidoTest {
@@ -36,6 +37,58 @@ class PedidoTest {
         assertThat(pedido.getImporteTotal()).isNull();
         assertThat(pedido.solicitudTarifa())
                 .isEqualTo(new SolicitudTarifa("28001", new BigDecimal("1.600"), 4));
+    }
+
+    @Test
+    void confirmarFijaElCosteYCalculaElTotal() {
+        Pedido pedido = pedidoReservado();
+
+        pedido.confirmar(new TarifaEnvio(new BigDecimal("7.95")));
+
+        // 97.49 + 7.95, exacto y con escala 2 (D7).
+        assertThat(pedido.getImporteTotal()).isEqualTo(new BigDecimal("105.44"));
+        assertThat(pedido.getCosteEnvio()).isEqualTo(new BigDecimal("7.95"));
+        assertThat(pedido.getEstado()).isEqualTo(EstadoPedido.CONFIRMADO);
+    }
+
+    @Test
+    void revertirLaConfirmacionDevuelveElPedidoACreadoSinImportes() {
+        Pedido pedido = pedidoReservado();
+
+        pedido.revertirConfirmacion();
+
+        assertThat(pedido.getEstado()).isEqualTo(EstadoPedido.CREADO);
+        assertThat(pedido.getCosteEnvio()).isNull();
+        assertThat(pedido.getImporteTotal()).isNull();
+    }
+
+    @Test
+    void noSePuedeConfirmarNiRevertirUnPedidoSinReservar() {
+        Pedido pedido = Pedido.crear(1L, "28001", List.of(linea(1, "10.00")), FECHA);
+        TarifaEnvio tarifa = new TarifaEnvio(new BigDecimal("7.95"));
+
+        assertThatThrownBy(() -> pedido.confirmar(tarifa)).isInstanceOf(TransicionInvalidaException.class);
+        assertThatThrownBy(pedido::revertirConfirmacion).isInstanceOf(TransicionInvalidaException.class);
+        assertThat(pedido.getEstado()).isEqualTo(EstadoPedido.CREADO);
+    }
+
+    @Test
+    void noSePuedeConfirmarDosVeces() {
+        Pedido pedido = pedidoReservado();
+        TarifaEnvio tarifa = new TarifaEnvio(new BigDecimal("7.95"));
+        pedido.confirmar(tarifa);
+
+        assertThatThrownBy(() -> pedido.confirmar(tarifa)).isInstanceOf(TransicionInvalidaException.class);
+    }
+
+    // CREADO → CONFIRMANDO lo hace el UPDATE atómico del repositorio, no un método del dominio (D4).
+    // Aquí se simula ese resultado para probar las transiciones siguientes sin base de datos.
+    private static Pedido pedidoReservado() {
+        Pedido pedido = Pedido.crear(1L, "28001", List.of(
+                new LineaPedido("Camiseta", 3, new BigDecimal("12.50"), new BigDecimal("0.2")),
+                new LineaPedido("Zapatillas", 1, new BigDecimal("59.99"), new BigDecimal("1.0"))), FECHA);
+        ReflectionTestUtils.setField(pedido, "estado", EstadoPedido.CONFIRMANDO);
+        return pedido;
     }
 
     @Test

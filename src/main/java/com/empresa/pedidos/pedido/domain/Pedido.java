@@ -32,7 +32,8 @@ import java.util.regex.Pattern;
  *   <li>Las transiciones de {@link EstadoPedido} se validan aquí (D3).</li>
  *   <li>{@code costeEnvio} e {@code importeTotal} son nulos hasta que el pedido está {@code CONFIRMADO}.</li>
  * </ul>
- * La creación pasa siempre por {@link #crear}. Las transiciones de confirmación se añaden en el paso 4.
+ * La creación pasa siempre por {@link #crear}. El paso a {@code CONFIRMANDO} lo hace la reserva atómica
+ * del repositorio (D4); {@link #confirmar} y {@link #revertirConfirmacion} completan las transiciones.
  *
  * <p>Concesión consciente (D2): la entidad de dominio lleva anotaciones JPA para no duplicar el
  * modelo con mappers. Depende de {@code jakarta.persistence}, pero no de Spring ni de HTTP.
@@ -189,6 +190,37 @@ public class Pedido {
             }
         }
         return bultos;
+    }
+
+    /**
+     * {@code CONFIRMANDO → CONFIRMADO}: fija el coste de envío y el importe total (D3, D7).
+     *
+     * @throws TransicionInvalidaException si el pedido no está reservado para confirmar
+     */
+    public void confirmar(TarifaEnvio tarifa) {
+        exigirEstado(EstadoPedido.CONFIRMANDO, "confirmar");
+        this.costeEnvio = tarifa.coste();
+        // Ambos sumandos tienen escala 2: la suma es exacta.
+        this.importeTotal = importeProductos.add(tarifa.coste());
+        this.estado = EstadoPedido.CONFIRMADO;
+    }
+
+    /**
+     * {@code CONFIRMANDO → CREADO}: libera la reserva cuando falla el proveedor, para poder reintentar (D3).
+     * {@code confirmacionIniciadaEn} se conserva como traza del último intento.
+     *
+     * @throws TransicionInvalidaException si el pedido no está reservado para confirmar
+     */
+    public void revertirConfirmacion() {
+        exigirEstado(EstadoPedido.CONFIRMANDO, "revertir la confirmación");
+        this.estado = EstadoPedido.CREADO;
+    }
+
+    private void exigirEstado(EstadoPedido esperado, String operacion) {
+        if (estado != esperado) {
+            throw new TransicionInvalidaException(
+                    "No se puede " + operacion + " un pedido en estado " + estado + "; se esperaba " + esperado);
+        }
     }
 
     /** @return los datos que se envían al proveedor de tarifas para este pedido (D1). */
