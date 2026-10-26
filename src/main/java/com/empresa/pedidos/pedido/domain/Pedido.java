@@ -15,9 +15,12 @@ import jakarta.persistence.OrderColumn;
 import jakarta.persistence.Table;
 import jakarta.persistence.Version;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
+import java.util.regex.Pattern;
 
 /**
  * Pedido de un cliente: raíz del agregado formado por el pedido y sus {@link LineaPedido}.
@@ -29,8 +32,7 @@ import java.util.List;
  *   <li>Las transiciones de {@link EstadoPedido} se validan aquí (D3).</li>
  *   <li>{@code costeEnvio} e {@code importeTotal} son nulos hasta que el pedido está {@code CONFIRMADO}.</li>
  * </ul>
- * El comportamiento que protege estas reglas se añade en los pasos 2 y 4; en este paso solo existe
- * el mapeo.
+ * La creación pasa siempre por {@link #crear}. Las transiciones de confirmación se añaden en el paso 4.
  *
  * <p>Concesión consciente (D2): la entidad de dominio lleva anotaciones JPA para no duplicar el
  * modelo con mappers. Depende de {@code jakarta.persistence}, pero no de Spring ni de HTTP.
@@ -38,6 +40,13 @@ import java.util.List;
 @Entity
 @Table(name = "pedido")
 public class Pedido {
+
+    // Dígitos enteros que caben en importe_productos NUMERIC(19,2). @Digits limita el precio unitario,
+    // pero no el subtotal ni la suma: sin esta comprobación el INSERT fallaría con un 500 (D7).
+    private static final int DIGITOS_ENTEROS_IMPORTE = 17;
+
+    // Código postal español: 5 dígitos (D1).
+    private static final Pattern CODIGO_POSTAL = Pattern.compile("\\d{5}");
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -94,6 +103,92 @@ public class Pedido {
 
     protected Pedido() {
         // Requerido por JPA.
+    }
+
+    /**
+     * Crea un pedido en estado {@code CREADO} con su importe de productos calculado a partir de las
+     * líneas. El coste de envío y el importe total quedan nulos hasta la confirmación (D2).
+     *
+     * @param clienteId           cliente que hace el pedido; su existencia la comprueba el caso de uso
+     * @param codigoPostalDestino código postal de entrega, de 5 dígitos (D1)
+     * @param lineas              al menos una línea
+     * @param fecha               instante de creación; lo aporta el llamante para poder fijarlo en los tests
+     * @throws PedidoInvalidoException si algún dato incumple las reglas
+     */
+    public static Pedido crear(Long clienteId, String codigoPostalDestino, List<LineaPedido> lineas, Instant fecha) {
+        if (clienteId == null) {
+            throw new PedidoInvalidoException("El cliente es obligatorio");
+        }
+        if (codigoPostalDestino == null || !CODIGO_POSTAL.matcher(codigoPostalDestino).matches()) {
+            throw new PedidoInvalidoException("El código postal de destino debe tener 5 dígitos");
+        }
+        if (lineas == null || lineas.isEmpty()) {
+            throw new PedidoInvalidoException("El pedido debe tener al menos una línea");
+        }
+        // stream().anyMatch y no contains(null): List.of(...).contains(null) lanza NullPointerException.
+        if (lineas.stream().anyMatch(Objects::isNull)) {
+            throw new PedidoInvalidoException("El pedido no puede tener líneas nulas");
+        }
+        if (fecha == null) {
+            throw new PedidoInvalidoException("La fecha del pedido es obligatoria");
+        }
+
+        Pedido pedido = new Pedido();
+        pedido.clienteId = clienteId;
+        pedido.codigoPostalDestino = codigoPostalDestino;
+        pedido.estado = EstadoPedido.CREADO;
+        pedido.fecha = fecha;
+        // Copia defensiva: quien llama no puede modificar las líneas después (D2).
+        pedido.lineas = new ArrayList<>(lineas);
+        pedido.importeProductos = pedido.calcularImporteProductos();
+        // Se calcula ya para que un desbordamiento se rechace al crear y no al confirmar.
+        pedido.numBultos();
+        return pedido;
+    }
+
+    // Suma de subtotales. Cada subtotal es exacto con 2 decimales, así que el setScale no redondea:
+    // solo fija la escala de la columna NUMERIC(19,2) (D7).
+    private BigDecimal calcularImporteProductos() {
+        BigDecimal importe = lineas.stream()
+                .map(LineaPedido::subtotal)
+                .reduce(BigDecimal.ZERO, BigDecimal::add)
+                .setScale(2, RoundingMode.UNNECESSARY);
+        if (importe.precision() - importe.scale() > DIGITOS_ENTEROS_IMPORTE) {
+            throw new PedidoInvalidoException("El importe del pedido supera el máximo admitido");
+        }
+        return importe;
+    }
+
+    /**
+     * Peso total que se envía al proveedor de tarifas: {@code Σ (cantidad × pesoUnitarioKg)} (D1).
+     *
+     * @return el peso en kilogramos, con 3 decimales
+     */
+    public BigDecimal pesoTotalKg() {
+        return lineas.stream()
+                .map(LineaPedido::pesoKg)
+                .reduce(BigDecimal.ZERO, BigDecimal::add)
+                .setScale(3, RoundingMode.UNNECESSARY);
+    }
+
+    /**
+     * Número de bultos que se envía al proveedor de tarifas: un bulto por unidad, {@code Σ cantidad}.
+     *
+     * <p>Regla de negocio provisional (D1): está aislada en este método para poder cambiarla sin
+     * tocar el resto.
+     *
+     * @throws PedidoInvalidoException si la suma no cabe en un {@code int}
+     */
+    public int numBultos() {
+        int bultos = 0;
+        for (LineaPedido linea : lineas) {
+            try {
+                bultos = Math.addExact(bultos, linea.getCantidad());
+            } catch (ArithmeticException desbordamiento) {
+                throw new PedidoInvalidoException("El número de bultos supera el máximo admitido");
+            }
+        }
+        return bultos;
     }
 
     public Long getId() {

@@ -15,6 +15,10 @@ spring:
     open-in-view: false
   flyway:
     enabled: true
+  jackson:
+    deserialization:
+      # Sin esto, "cantidad": 1.9 se leería como 1 sin avisar. Así da 400 (D1: cantidad entera).
+      accept-float-as-int: false
 
 server:
   port: 8080
