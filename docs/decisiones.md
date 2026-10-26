@@ -95,17 +95,40 @@ CREADO ──reservar──▶ CONFIRMANDO ──éxito──▶ CONFIRMADO
 | En `CONFIRMANDO` (otra petición en curso) | 409 Conflict | sin cambios |
 | Pedido inexistente | 404 | — |
 | Proveedor no disponible tras reintentos, o timeout | 503 + `Retry-After` | `CREADO` |
+| Otro 5xx del proveedor (500, 502, 504…), sin reintento | 503 + `Retry-After` | `CREADO` |
 | 401/403 u otro 4xx del proveedor (error de configuración de **nuestra** integración, no del consumidor) | 502, registrado como error | `CREADO` |
-| Respuesta inválida (coste ausente, negativo, más de 2 decimales, moneda ≠ EUR) | 502 | `CREADO` |
+| Respuesta inválida (coste ausente, negativo, más de 2 decimales significativos, moneda ≠ EUR) o ilegible | 502 | `CREADO` |
+
+- `Retry-After: 30` (segundos), valor fijo: sin datos reales del proveedor no hay base para calcularlo.
+- Si la reserva no modifica ninguna fila y el pedido aparece en `CREADO`, otra petición lo tenía reservado y acaba de liberarlo: también es 409 y el cliente puede reintentar.
+- Los errores del proveedor (503/502) llevan un `detail` fijo: el mensaje y las causas de la excepción pueden contener el cuerpo de la respuesta del proveedor.
 
 Evolución: cabecera `Idempotency-Key`.
 
 ## D6. Resiliencia frente al proveedor
 - **Timeouts por intento:** conexión 1 s, lectura 6 s (el proveedor puede tardar hasta 5 s legítimamente).
-- **Reintentos (Resilience4j):** **2 intentos como máximo**, solo ante errores definidos como recuperables, con backoff y jitter.
-  - Recuperables: 503 y errores de conexión (la petición no llegó al proveedor).
+  - Con `JdkClientHttpRequestFactory` (Spring 6.2), el "timeout de lectura" es un límite de **todo el intercambio** de un intento: conexión, envío, cabeceras y cuerpo. El presupuesto real para la respuesta es 6 s menos lo que tarde la conexión.
+  - Por eso la configuración exige lectura > conexión: si no, un timeout de conexión llegaría como timeout del intercambio y dejaría de reintentarse sin avisar.
+- **Reintentos (Resilience4j):** **2 intentos como máximo**, solo ante errores definidos como recuperables, con backoff exponencial y jitter.
+  - Recuperables: el **503 exacto** y los errores de conexión en los que la petición no llegó a enviarse (conexión rechazada, host no resoluble, timeout de conexión).
   - **No** se reintenta tras un timeout de lectura, porque ya se ha consumido el tiempo de un intento.
-  - **No** se reintentan los 4xx.
+  - **No** se reintentan los 4xx, los demás 5xx, las respuestas inválidas ni otros errores de E/S (por ejemplo, una conexión cortada después de enviar la petición: el proveedor pudo recibirla).
+  - "2 intentos" son intentos HTTP. Ante una conexión rechazada, el cliente del JDK repite internamente la conexión TCP; no duplica peticiones, porque el proveedor no ha recibido nada.
+  - Si el hilo se interrumpe durante la espera entre intentos, Resilience4j abandona sin reintentar y no restaura el flag de interrupción. En un hilo de servlet solo afecta al apagado; el log indica los intentos realmente hechos.
+- **Clasificación en el código** (`ProveedorTarifasHttp`):
+
+  | Fallo | Reintento | Resultado (D5) |
+  |---|---|---|
+  | 503 | Sí | Agotados los intentos: no disponible → 503 |
+  | `ConnectException`, `HttpConnectTimeoutException` | Sí | Agotados los intentos: no disponible → 503 |
+  | `HttpTimeoutException` (timeout del intercambio) | No | No disponible → 503 |
+  | Otro 5xx | No | No disponible → 503 |
+  | Otro error de E/S, también si el cuerpo se corta o vence el timeout mientras llega | No | No disponible → 503 |
+  | 4xx | No | Error de integración → 502 |
+  | Respuesta inválida o ilegible (no es JSON válido, tipo de contenido inesperado) | No | Error de integración → 502 |
+
+  `HttpConnectTimeoutException` **hereda** de `HttpTimeoutException`: el código comprueba primero el fallo de conexión para que un timeout de conexión no se trate como timeout de respuesta.
+- **Qué es recuperable lo decide el código, no la configuración:** el `Retry` se construye a partir de `ProveedorTarifasProperties` y solo reintenta una excepción interna del adaptador. Se descarta `@Retry` con `retry-exceptions` en el yml: depende de un proxy AOP (con la misma trampa de autoinvocación que `@Transactional`) y deja la clasificación en un fichero de configuración.
 - **Latencia:** los timeouts se configuran por intento; **no se establece un límite global estricto** para la operación. El peor caso ronda dos timeouts de lectura más la espera del backoff, pero es una estimación: no incluye, por ejemplo, la adquisición de conexión ni otras fases del cliente HTTP.
 - **Por qué 2 intentos:** equilibrio entre capacidad de recuperación y latencia de una petición síncrona. Sin datos reales del proveedor no se puede afirmar qué porcentaje de fallos recupera un reintento.
 - **Supuesto:** consultar una tarifa no tiene efectos secundarios, por lo que reintentar es seguro. El contrato no lo garantiza explícitamente.
@@ -146,3 +169,5 @@ Evolución: cabecera `Idempotency-Key`.
 - El falso **retiene la primera llamada** con un `CountDownLatch`. Mientras está retenida se lanza la segunda confirmación, que debe recibir el conflicto. Después se libera la primera.
 - Todas las esperas tienen límite (`await(timeout)`), para que un fallo no bloquee la suite. No se usan `sleep` arbitrarios.
 - Se comprueba: exactamente 1 llamada al proveedor, una respuesta 200 y una 409, y el pedido `CONFIRMADO` con el total correcto.
+- **Test adicional de carrera real:** el escenario anterior es determinista, pero la segunda petición llega cuando la reserva de la primera ya está confirmada, así que nunca compiten dos UPDATE. Por eso hay otro test: 8 peticiones salen a la vez desde una puerta común (`CountDownLatch`) y compiten por el UPDATE condicional. El ganador queda retenido en el proveedor hasta que los 7 perdedores han respondido 409: 1 llamada, 7 × 409, 1 × 200.
+- Comprobación de que los tests no son vacíos: con la condición `estado = 'CREADO'` eliminada del UPDATE, ambos tests fallan.
